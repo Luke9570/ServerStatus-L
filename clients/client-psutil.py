@@ -46,18 +46,22 @@ def get_swap():
     return int(Mem.total/1024.0), int(Mem.used/1024.0)
 
 def get_hdd():
-    valid_fs = [ "ext4", "ext3", "ext2", "reiserfs", "jfs", "btrfs", "fuseblk", "zfs", "simfs", "ntfs", "fat32", "exfat", "xfs" ]
-    disks = dict()
-    size = 0
-    used = 0
-    for disk in psutil.disk_partitions():
-        if not disk.device in disks and disk.fstype.lower() in valid_fs:
-            disks[disk.device] = disk.mountpoint
-    for disk in disks.values():
-        usage = psutil.disk_usage(disk)
-        size += usage.total
-        used += usage.used
-    return int(size/1024.0/1024.0), int(used/1024.0/1024.0)
+    if "darwin" in sys.platform:
+        return int(psutil.disk_usage("/").total/1024.0/1024.0), int((psutil.disk_usage("/").total-psutil.disk_usage("/").free)/1024.0/1024.0)
+    else:
+        valid_fs = ["ext4", "ext3", "ext2", "reiserfs", "jfs", "btrfs", "fuseblk", "zfs", "simfs", "ntfs", "fat32",
+                    "exfat", "xfs"]
+        disks = dict()
+        size = 0
+        used = 0
+        for disk in psutil.disk_partitions():
+            if not disk.device in disks and disk.fstype.lower() in valid_fs:
+                disks[disk.device] = disk.mountpoint
+        for disk in disks.values():
+            usage = psutil.disk_usage(disk)
+            size += usage.total
+            used += usage.used
+        return int(size/1024.0/1024.0), int(used/1024.0/1024.0)
 
 def get_cpu():
     return psutil.cpu_percent(interval=INTERVAL)
@@ -88,13 +92,23 @@ def tupd():
             u = int(os.popen('ss -u|wc -l').read()[:-1])-1
             p = int(os.popen('ps -ef|wc -l').read()[:-1])-2
             d = int(os.popen('ps -eLf|wc -l').read()[:-1])-2
+        elif sys.platform.startswith("darwin") is True:
+            t = int(os.popen('lsof -nP -iTCP  | wc -l').read()[:-1]) - 1
+            u = int(os.popen('lsof -nP -iUDP  | wc -l').read()[:-1]) - 1
+            p = len(psutil.pids())
+            d = 0
+            for k in psutil.pids():
+                try:
+                    d += psutil.Process(k).num_threads()
+                except:
+                    pass
+
         elif sys.platform.startswith("win") is True:
             t = int(os.popen('netstat -an|find "TCP" /c').read()[:-1])-1
             u = int(os.popen('netstat -an|find "UDP" /c').read()[:-1])-1
             p = len(psutil.pids())
-            d = 0
-            # cpu is high, default: 0
-            # d = sum([psutil.Process(k).num_threads() for k in [x for x in psutil.pids()]])
+            # if you find cpu is high, please set d=0
+            d = sum([psutil.Process(k).num_threads() for k in psutil.pids()])
         else:
             t,u,p,d = 0,0,0,0
         return t,u,p,d
@@ -139,17 +153,18 @@ def _ping_thread(host, mark, port):
     lostPacket = 0
     packet_queue = Queue(maxsize=PING_PACKET_HISTORY_LEN)
 
-    IP = host
-    if host.count(':') < 1:     # if not plain ipv6 address, means ipv4 address or hostname
-        try:
-            if PROBE_PROTOCOL_PREFER == 'ipv4':
-                IP = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
-            else:
-                IP = socket.getaddrinfo(host, None, socket.AF_INET6)[0][4][0]
-        except Exception:
+    while True:
+        # flush dns, every time.
+        IP = host
+        if host.count(':') < 1:  # if not plain ipv6 address, means ipv4 address or hostname
+            try:
+                if PROBE_PROTOCOL_PREFER == 'ipv4':
+                    IP = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+                else:
+                    IP = socket.getaddrinfo(host, None, socket.AF_INET6)[0][4][0]
+            except Exception:
                 pass
 
-    while True:
         if packet_queue.full():
             if packet_queue.get() == 0:
                 lostPacket -= 1
@@ -205,44 +220,49 @@ def _disk_io():
     比如我这里是机械硬盘，大量做随机小文件读写，那么很低的读写也就能造成硬盘长时间的等待。
     如果这里做连续性IO，那么普通机械硬盘写入到100Mb/s，那么也能造成硬盘长时间的等待。
     磁盘读写有误差：4k，8k ，https://stackoverflow.com/questions/34413926/psutil-vs-dd-monitoring-disk-i-o
+    macos/win，暂不处理。
     """
-    while True:
-        # first get a list of all processes and disk io counters
-        procs = [p for p in psutil.process_iter()]
-        for p in procs[:]:
-            try:
-                p._before = p.io_counters()
-            except psutil.Error:
-                procs.remove(p)
-                continue
-        disks_before = psutil.disk_io_counters()
-
-        # sleep some time, only when INTERVAL==1 , io read/write per_sec.
-        # when INTERVAL > 1, io read/write per_INTERVAL
-        time.sleep(INTERVAL)
-
-        # then retrieve the same info again
-        for p in procs[:]:
-            with p.oneshot():
+    if "darwin" in sys.platform or "win" in sys.platform:
+        diskIO["read"] = 0
+        diskIO["write"] = 0
+    else:
+        while True:
+            # first get a list of all processes and disk io counters
+            procs = [p for p in psutil.process_iter()]
+            for p in procs[:]:
                 try:
-                    p._after = p.io_counters()
-                    p._cmdline = ' '.join(p.cmdline())
-                    if not p._cmdline:
-                        p._cmdline = p.name()
-                    p._username = p.username()
-                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    p._before = p.io_counters()
+                except psutil.Error:
                     procs.remove(p)
-        disks_after = psutil.disk_io_counters()
+                    continue
+            disks_before = psutil.disk_io_counters()
 
-        # finally calculate results by comparing data before and
-        # after the interval
-        for p in procs:
-            p._read_per_sec = p._after.read_bytes - p._before.read_bytes
-            p._write_per_sec = p._after.write_bytes - p._before.write_bytes
-            p._total = p._read_per_sec + p._write_per_sec
+            # sleep some time, only when INTERVAL==1 , io read/write per_sec.
+            # when INTERVAL > 1, io read/write per_INTERVAL
+            time.sleep(INTERVAL)
 
-        diskIO["read"] = disks_after.read_bytes - disks_before.read_bytes
-        diskIO["write"] = disks_after.write_bytes - disks_before.write_bytes
+            # then retrieve the same info again
+            for p in procs[:]:
+                with p.oneshot():
+                    try:
+                        p._after = p.io_counters()
+                        p._cmdline = ' '.join(p.cmdline())
+                        if not p._cmdline:
+                            p._cmdline = p.name()
+                        p._username = p.username()
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        procs.remove(p)
+            disks_after = psutil.disk_io_counters()
+
+            # finally calculate results by comparing data before and
+            # after the interval
+            for p in procs:
+                p._read_per_sec = p._after.read_bytes - p._before.read_bytes
+                p._write_per_sec = p._after.write_bytes - p._before.write_bytes
+                p._total = p._read_per_sec + p._write_per_sec
+
+            diskIO["read"] = disks_after.read_bytes - disks_before.read_bytes
+            diskIO["write"] = disks_after.write_bytes - disks_before.write_bytes
 
 def get_realtime_data():
     '''
@@ -344,7 +364,7 @@ if __name__ == '__main__':
                 CPU = get_cpu()
                 NET_IN, NET_OUT = liuliang()
                 Uptime = get_uptime()
-                Load_1, Load_5, Load_15 = os.getloadavg() if 'linux' in sys.platform else (0.0, 0.0, 0.0)
+                Load_1, Load_5, Load_15 = os.getloadavg() if 'linux' in sys.platform or 'darwin' in sys.platform else (0.0, 0.0, 0.0)
                 MemoryTotal, MemoryUsed = get_memory()
                 SwapTotal, SwapUsed = get_swap()
                 HDDTotal, HDDUsed = get_hdd()
