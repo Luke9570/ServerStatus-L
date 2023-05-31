@@ -29,7 +29,7 @@ services:
     environment:
       - TG_CHAT_ID=${TG_CHAT_ID}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN}
-
+      - NOTIFY_INTERVAL=${NOTIFY_INTERVAL}
 networks:
   serverstatus-network:
     name: serverstatus-network
